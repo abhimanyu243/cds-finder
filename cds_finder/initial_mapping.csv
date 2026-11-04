@@ -1,0 +1,25 @@
+# Initial table mapping: ECC tables that S/4HANA replaced, merged or split.
+# It is copied into the mapping database the first time the app starts with an empty database.
+# After that, maintain the mapping on the Table mapping page. S4_TABLES are separated by ;
+ECC_TABLE,S4_TABLES,NOTE
+MSEG,MATDOC,Material document header and item were merged into MATDOC
+MKPF,MATDOC,Material document header and item were merged into MATDOC
+KONV,PRCD_ELEMENTS,Pricing conditions moved to PRCD_ELEMENTS
+VBUK,VBAK;LIKP;VBRK,Header status moved into the header table of each document type
+VBUP,VBAP;LIPS;VBRP,Item status moved into the item table of each document type
+FAGLFLEXA,ACDOCA,New G/L line items are in the Universal Journal
+FAGLFLEXT,ACDOCA,New G/L totals are calculated from the Universal Journal
+GLT0,ACDOCA,Classic G/L totals are calculated from the Universal Journal
+COEP,ACDOCA;COEP,Actual CO line items are in the Universal Journal; COEP keeps other value types
+COSP,ACDOCA,CO totals are calculated from the Universal Journal
+COSS,ACDOCA,CO totals are calculated from the Universal Journal
+ANEP,ACDOCA,Asset line items are in the Universal Journal
+ANEA,ACDOCA,Asset line items are in the Universal Journal
+ANLP,ACDOCA,Asset period values are in the Universal Journal
+ANLC,ACDOCA,Asset totals are calculated from the Universal Journal
+BSIS,BSEG;ACDOCA,Index table replaced by a compatibility view
+BSAS,BSEG;ACDOCA,Index table replaced by a compatibility view
+BSID,BSEG,Index table replaced by a compatibility view
+BSAD,BSEG,Index table replaced by a compatibility view
+BSIK,BSEG,Index table replaced by a compatibility view
+BSAK,BSEG,Index table replaced by a compatibility view

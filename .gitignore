@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.env
+# Metadata extracts and the live mapping database stay out of version control
+data/*
+!data/README.md
+.DS_Store
+
+examples/CDS_FIELD_ORIGIN.csv
