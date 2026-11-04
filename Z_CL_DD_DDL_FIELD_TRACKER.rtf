@@ -1,0 +1,413 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2870
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 *&---------------------------------------------------------------------*\
+*& Report Z_CL_DD_DDL_FIELD_TRACKER\
+*&---------------------------------------------------------------------*\
+*& For each field of each CDS view: the table and field it comes from.\
+*& Uses SAP class CL_DD_DDL_FIELD_TRACKER and saves the result as CSV.\
+*&\
+*& Read-only. Reads repository metadata only, never business data.\
+*&\
+*& Input : CDS view (DDL source) names or patterns (for example *).\
+*&         For a long list use Multiple selection > Upload from clipboard.\
+*& Levels: if a field comes from another CDS view, that view is\
+*&         processed too (next level), until real tables are reached.\
+*& Output: CDS_FIELD_ORIGIN.csv        one row per view field\
+*&         CDS_FIELD_ORIGIN_VIEWS.csv  one row per view: status, rows, reason\
+*&\
+*& Rows are written to the file in blocks while the run goes on, so\
+*& memory stays flat however many views there are. For a full run use\
+*& the application server option in a background job (F9).\
+*&---------------------------------------------------------------------*\
+REPORT Z_CL_DD_DDL_FIELD_TRACKER_N.\
+\
+DATA gv_ddl TYPE ddddlsrc-ddlname.\
+\
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME.\
+  SELECT-OPTIONS s_ddl FOR gv_ddl NO INTERVALS OBLIGATORY.\
+  PARAMETERS: p_deep   AS CHECKBOX DEFAULT 'X',\
+              p_levels TYPE i DEFAULT 20.\
+SELECTION-SCREEN END OF BLOCK b1.\
+\
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME.\
+  PARAMETERS: p_pc  RADIOBUTTON GROUP out DEFAULT 'X',\
+              p_srv RADIOBUTTON GROUP out,\
+              p_dir TYPE localfile LOWER CASE DEFAULT 'C:\\temp\\'.\
+SELECTION-SCREEN END OF BLOCK b2.\
+\
+*----------------------------------------------------------------------*\
+* CSV file written in blocks. Only one block is ever held in memory.\
+*----------------------------------------------------------------------*\
+CLASS lcl_csv_file DEFINITION FINAL.\
+  PUBLIC SECTION.\
+    METHODS constructor\
+      IMPORTING iv_file  TYPE string\
+                iv_to_pc TYPE abap_bool.\
+    METHODS add\
+      IMPORTING it_values TYPE string_table.\
+    METHODS line_count\
+      RETURNING VALUE(rv_count) TYPE i.\
+    METHODS close\
+      RETURNING VALUE(rv_ok) TYPE abap_bool.\
+\
+  PRIVATE SECTION.\
+    CONSTANTS c_block TYPE i VALUE 50000.\
+\
+    DATA mv_file    TYPE string.\
+    DATA mv_to_pc   TYPE abap_bool.\
+    DATA mv_started TYPE abap_bool.   " first block has been written\
+    DATA mv_failed  TYPE abap_bool.\
+    DATA mv_count   TYPE i.\
+    DATA mt_block   TYPE string_table.\
+\
+    METHODS flush.\
+ENDCLASS.\
+\
+CLASS lcl_csv_file IMPLEMENTATION.\
+\
+  METHOD constructor.\
+    mv_file  = iv_file.\
+    mv_to_pc = iv_to_pc.\
+  ENDMETHOD.\
+\
+  METHOD add.\
+    DATA lt_cells TYPE string_table.\
+    LOOP AT it_values INTO DATA(lv_value).\
+      lv_value = replace( val = lv_value sub = cl_abap_char_utilities=>newline with = ` ` occ = 0 ).\
+      lv_value = replace( val = lv_value sub = `"` with = `""` occ = 0 ).\
+      APPEND |"\{ lv_value \}"| TO lt_cells.\
+    ENDLOOP.\
+    APPEND concat_lines_of( table = lt_cells sep = `,` ) TO mt_block.\
+    mv_count = mv_count + 1.\
+    IF lines( mt_block ) >= c_block.\
+      flush( ).\
+    ENDIF.\
+  ENDMETHOD.\
+\
+  METHOD line_count.\
+    rv_count = mv_count.\
+  ENDMETHOD.\
+\
+  METHOD close.\
+    flush( ).\
+    IF mv_to_pc = abap_false AND mv_started = abap_true.\
+      CLOSE DATASET mv_file.   " ignored if the file never opened\
+    ENDIF.\
+    rv_ok = xsdbool( mv_failed = abap_false ).\
+  ENDMETHOD.\
+\
+  METHOD flush.\
+    IF mt_block IS INITIAL OR mv_failed = abap_true.\
+      CLEAR mt_block.\
+      RETURN.\
+    ENDIF.\
+\
+    IF mv_to_pc = abap_true.\
+      " The first block creates the file, later blocks are appended.\
+      cl_gui_frontend_services=>gui_download(\
+        EXPORTING  filename  = mv_file\
+                   filetype  = 'ASC'\
+                   append    = mv_started\
+                   codepage  = '4110'                                  " UTF-8\
+                   write_bom = xsdbool( mv_started = abap_false )      " so Excel reads UTF-8\
+        CHANGING   data_tab  = mt_block\
+        EXCEPTIONS OTHERS    = 1 ).\
+      IF sy-subrc <> 0.\
+        mv_failed = abap_true.\
+      ENDIF.\
+    ELSE.\
+      TRY.\
+          IF mv_started = abap_false.\
+            OPEN DATASET mv_file FOR OUTPUT IN TEXT MODE ENCODING UTF-8.\
+            IF sy-subrc <> 0.\
+              mv_failed = abap_true.\
+            ENDIF.\
+          ENDIF.\
+          IF mv_failed = abap_false.\
+            LOOP AT mt_block INTO DATA(lv_line).\
+              TRANSFER lv_line TO mv_file.\
+            ENDLOOP.\
+          ENDIF.\
+        CATCH cx_sy_file_access_error.\
+          mv_failed = abap_true.\
+      ENDTRY.\
+    ENDIF.\
+\
+    mv_started = abap_true.\
+    CLEAR mt_block.\
+  ENDMETHOD.\
+\
+ENDCLASS.\
+\
+*----------------------------------------------------------------------*\
+* Reads the field origin of each view, level by level.\
+*----------------------------------------------------------------------*\
+CLASS lcl_field_origin DEFINITION FINAL.\
+  PUBLIC SECTION.\
+    METHODS run.\
+\
+  PRIVATE SECTION.\
+    TYPES ty_name  TYPE ddddlsrc-ddlname.\
+    TYPES tt_names TYPE SORTED TABLE OF ty_name WITH UNIQUE KEY table_line.\
+\
+    DATA mt_columns  TYPE string_table.\
+    DATA mo_fields   TYPE REF TO lcl_csv_file.\
+    DATA mo_views    TYPE REF TO lcl_csv_file.\
+    DATA mv_ok       TYPE i.\
+    DATA mv_problems TYPE i.\
+    DATA mv_not_read TYPE i.\
+\
+    METHODS start_names\
+      RETURNING VALUE(rt_names) TYPE tt_names.\
+    METHODS views_among\
+      IMPORTING it_candidates   TYPE tt_names\
+                it_done         TYPE tt_names\
+      RETURNING VALUE(rt_names) TYPE tt_names.\
+    METHODS track\
+      IMPORTING iv_ddl   TYPE ty_name\
+                iv_level TYPE i\
+      CHANGING  ct_bases TYPE tt_names.\
+    METHODS set_columns\
+      IMPORTING it_sample TYPE ANY TABLE.\
+    METHODS columns_of\
+      IMPORTING io_struct       TYPE REF TO cl_abap_structdescr\
+      RETURNING VALUE(rt_names) TYPE string_table.\
+    METHODS log_view\
+      IMPORTING iv_ddl    TYPE ty_name\
+                iv_level  TYPE i\
+                iv_status TYPE string\
+                iv_rows   TYPE i DEFAULT 0\
+                iv_reason TYPE string OPTIONAL.\
+ENDCLASS.\
+\
+CLASS lcl_field_origin IMPLEMENTATION.\
+\
+  METHOD run.\
+    DATA lt_done  TYPE tt_names.\
+    DATA lt_bases TYPE tt_names.\
+    DATA lv_total TYPE i.\
+    DATA lv_index TYPE i.\
+    DATA lv_last  TYPE i.\
+\
+    DATA(lv_dir) = condense( CONV string( p_dir ) ).\
+    mo_fields = NEW #( iv_file = |\{ lv_dir \}CDS_FIELD_ORIGIN.csv|       iv_to_pc = p_pc ).\
+    mo_views  = NEW #( iv_file = |\{ lv_dir \}CDS_FIELD_ORIGIN_VIEWS.csv| iv_to_pc = p_pc ).\
+\
+    " The field header is added by set_columns on the first view read.\
+    mo_views->add( VALUE #( ( `DDLNAME` ) ( `LEVEL` ) ( `STATUS` ) ( `FIELD_ROWS` ) ( `REASON` ) ) ).\
+\
+    DATA(lt_todo) = start_names( ).\
+    DATA(lv_selected) = lines( lt_todo ).\
+    DATA(lv_level) = 1.\
+\
+    WHILE lt_todo IS NOT INITIAL AND lv_level <= p_levels.\
+      CLEAR lt_bases.\
+      lv_total = lines( lt_todo ).\
+      LOOP AT lt_todo INTO DATA(lv_ddl).\
+        lv_index = sy-tabix.\
+        cl_progress_indicator=>progress_indicate(\
+          i_text               = |Level \{ lv_level \}: \{ lv_index \} of \{ lv_total \} (\{ lv_ddl \})|\
+          i_processed          = lv_index\
+          i_total              = lv_total\
+          i_output_immediately = abap_false ).\
+        track( EXPORTING iv_ddl = lv_ddl iv_level = lv_level CHANGING ct_bases = lt_bases ).\
+        INSERT lv_ddl INTO TABLE lt_done.\
+      ENDLOOP.\
+      lv_last = lv_level.\
+\
+      IF p_deep = abap_false.\
+        CLEAR lt_todo.\
+        EXIT.\
+      ENDIF.\
+      lt_todo = views_among( it_candidates = lt_bases it_done = lt_done ).\
+      lv_level = lv_level + 1.\
+    ENDWHILE.\
+\
+    " Views still waiting were cut off by the level limit: log them, never drop them.\
+    LOOP AT lt_todo INTO lv_ddl.\
+      log_view( iv_ddl    = lv_ddl\
+                iv_level  = lv_level\
+                iv_status = `NOT_READ`\
+                iv_reason = |Level limit \{ p_levels \} reached| ).\
+    ENDLOOP.\
+\
+    IF mo_fields->line_count( ) = 0.   " no view could be read: still write a header\
+      mo_fields->add( VALUE #( ( `DDLNAME` ) ( `LEVEL` ) ) ).\
+    ENDIF.\
+\
+    " Close both files, even if the first one fails.\
+    DATA(lv_fields_ok) = mo_fields->close( ).\
+    DATA(lv_views_ok)  = mo_views->close( ).\
+\
+    DATA(lv_text) = |Views selected: \{ lv_selected \}. Read OK: \{ mv_ok \}. Problems: \{ mv_problems \}. Not read (level limit): \{ mv_not_read \}.|.\
+    WRITE / lv_text.\
+    lv_text = |Field rows written: \{ mo_fields->line_count( ) - 1 \}. Highest level reached: \{ lv_last \} of \{ p_levels \}.|.\
+    WRITE / lv_text.\
+    IF lv_fields_ok = abap_true AND lv_views_ok = abap_true.\
+      lv_text = |Saved to \{ lv_dir \}: CDS_FIELD_ORIGIN.csv and CDS_FIELD_ORIGIN_VIEWS.csv|.\
+    ELSE.\
+      lv_text = |Saving stopped part-way. Check the folder name, your authorisation and the free space.|.\
+    ENDIF.\
+    WRITE / lv_text.\
+  ENDMETHOD.\
+\
+  METHOD start_names.\
+    DATA lt_names TYPE STANDARD TABLE OF ty_name WITH EMPTY KEY.\
+    DATA lt_found TYPE STANDARD TABLE OF ty_name WITH EMPTY KEY.\
+    DATA(lt_selection) = s_ddl[].\
+\
+    " A pasted list can hold thousands of names, too many for one IN clause.\
+    " So single names are checked with FOR ALL ENTRIES, patterns with IN.\
+    lt_names = VALUE #( FOR ls_sel IN lt_selection WHERE ( sign = 'I' AND option = 'EQ' ) ( ls_sel-low ) ).\
+    IF lt_names IS NOT INITIAL.\
+      SELECT ddlname FROM ddddlsrc INTO TABLE @lt_found\
+        FOR ALL ENTRIES IN @lt_names\
+        WHERE ddlname = @lt_names-table_line AND as4local = 'A'.\
+    ENDIF.\
+\
+    DATA(lt_patterns) = lt_selection.\
+    DELETE lt_patterns WHERE sign = 'I' AND option = 'EQ'.\
+    IF line_exists( lt_patterns[ sign = 'I' ] ).\
+      SELECT ddlname FROM ddddlsrc APPENDING TABLE @lt_found\
+        WHERE ddlname IN @lt_patterns AND as4local = 'A'.\
+    ENDIF.\
+\
+    IF line_exists( lt_selection[ sign = 'E' ] ).\
+      DELETE lt_found WHERE table_line NOT IN lt_selection.\
+    ENDIF.\
+\
+    " The table has an empty key, so name the column explicitly.\
+    SORT lt_found BY table_line.\
+    DELETE ADJACENT DUPLICATES FROM lt_found COMPARING table_line.\
+    rt_names = lt_found.\
+\
+    LOOP AT lt_names INTO DATA(lv_name).\
+      IF NOT line_exists( rt_names[ table_line = lv_name ] ).\
+        log_view( iv_ddl    = lv_name\
+                  iv_level  = 1\
+                  iv_status = `NOT_FOUND`\
+                  iv_reason = `Not found as an active CDS view (DDDDLSRC)` ).\
+      ENDIF.\
+    ENDLOOP.\
+  ENDMETHOD.\
+\
+  METHOD views_among.\
+    DATA lt_new      TYPE STANDARD TABLE OF ty_name WITH EMPTY KEY.\
+    DATA lt_sqlviews TYPE STANDARD TABLE OF ddl_object_names-cds_db_view WITH EMPTY KEY.\
+    DATA lv_sqlview  TYPE ddl_object_names-cds_db_view.\
+    DATA lt_found    TYPE STANDARD TABLE OF ty_name WITH EMPTY KEY.\
+\
+    LOOP AT it_candidates INTO DATA(lv_name).\
+      IF NOT line_exists( it_done[ table_line = lv_name ] ).\
+        APPEND lv_name TO lt_new.\
+      ENDIF.\
+    ENDLOOP.\
+    IF lt_new IS INITIAL.\
+      RETURN.\
+    ENDIF.\
+\
+    " One bulk read per level, never one read per field.\
+    SELECT ddlname FROM ddddlsrc INTO TABLE @lt_found\
+      FOR ALL ENTRIES IN @lt_new\
+      WHERE ddlname = @lt_new-table_line AND as4local = 'A'.\
+\
+    " Older (DDIC-based) views can come back under their SQL view name,\
+    " which is at most 16 characters long.\
+    LOOP AT lt_new INTO lv_name.\
+      IF strlen( lv_name ) <= 16.\
+        lv_sqlview = lv_name.\
+        APPEND lv_sqlview TO lt_sqlviews.\
+      ENDIF.\
+    ENDLOOP.\
+    IF lt_sqlviews IS NOT INITIAL.\
+      SELECT cds_ddl FROM ddl_object_names APPENDING TABLE @lt_found\
+        FOR ALL ENTRIES IN @lt_sqlviews\
+        WHERE cds_db_view = @lt_sqlviews-table_line.\
+    ENDIF.\
+\
+    LOOP AT lt_found INTO lv_name.\
+      IF NOT line_exists( it_done[ table_line = lv_name ] ).\
+        INSERT lv_name INTO TABLE rt_names.\
+      ENDIF.\
+    ENDLOOP.\
+  ENDMETHOD.\
+\
+  METHOD track.\
+    " The result type differs between releases, so take whatever the\
+    " method returns and read its columns at runtime.\
+    TRY.\
+        DATA(lt_fields) = NEW cl_dd_ddl_field_tracker( iv_ddlname = iv_ddl )->get_base_field_information( ).\
+      CATCH cx_root INTO DATA(lx_error).   " one bad view must not stop the run\
+        log_view( iv_ddl = iv_ddl iv_level = iv_level iv_status = `ERROR` iv_reason = lx_error->get_text( ) ).\
+        RETURN.\
+    ENDTRY.\
+    IF lt_fields IS INITIAL.\
+      log_view( iv_ddl = iv_ddl iv_level = iv_level iv_status = `NO_FIELDS` iv_reason = `No fields returned` ).\
+      RETURN.\
+    ENDIF.\
+    IF mt_columns IS INITIAL.\
+      set_columns( lt_fields ).\
+    ENDIF.\
+\
+    LOOP AT lt_fields ASSIGNING FIELD-SYMBOL(<ls_field>).\
+      DATA(lt_values) = VALUE string_table( ( CONV #( iv_ddl ) ) ( |\{ iv_level \}| ) ).\
+      LOOP AT mt_columns INTO DATA(lv_column).\
+        ASSIGN COMPONENT lv_column OF STRUCTURE <ls_field> TO FIELD-SYMBOL(<lv_value>).\
+        APPEND |\{ <lv_value> \}| TO lt_values.\
+      ENDLOOP.\
+      mo_fields->add( lt_values ).\
+\
+      " Remember where the field comes from; the next level checks if it is a view.\
+      ASSIGN COMPONENT 'BASE_OBJECT' OF STRUCTURE <ls_field> TO FIELD-SYMBOL(<lv_base>).\
+      IF sy-subrc = 0 AND <lv_base> IS NOT INITIAL.\
+        INSERT CONV ty_name( to_upper( CONV string( <lv_base> ) ) ) INTO TABLE ct_bases.\
+      ENDIF.\
+    ENDLOOP.\
+\
+    log_view( iv_ddl = iv_ddl iv_level = iv_level iv_status = `OK` iv_rows = lines( lt_fields ) ).\
+  ENDMETHOD.\
+\
+  METHOD set_columns.\
+    DATA(lo_table) = CAST cl_abap_tabledescr( cl_abap_typedescr=>describe_by_data( it_sample ) ).\
+    mt_columns = columns_of( CAST #( lo_table->get_table_line_type( ) ) ).\
+    mo_fields->add( VALUE #( ( `DDLNAME` ) ( `LEVEL` ) ( LINES OF mt_columns ) ) ).\
+  ENDMETHOD.\
+\
+  METHOD columns_of.\
+    DATA(lt_components) = io_struct->get_components( ).\
+    LOOP AT lt_components INTO DATA(ls_component).\
+      IF ls_component-as_include = abap_true.\
+        APPEND LINES OF columns_of( CAST #( ls_component-type ) ) TO rt_names.\
+      ELSEIF ls_component-type->kind = cl_abap_typedescr=>kind_elem.\
+        APPEND ls_component-name TO rt_names.\
+      ENDIF.\
+    ENDLOOP.\
+  ENDMETHOD.\
+\
+  METHOD log_view.\
+    CASE iv_status.\
+      WHEN `OK`.\
+        mv_ok = mv_ok + 1.\
+      WHEN `NOT_READ`.\
+        mv_not_read = mv_not_read + 1.\
+      WHEN OTHERS.\
+        mv_problems = mv_problems + 1.\
+    ENDCASE.\
+    mo_views->add( VALUE #( ( CONV #( iv_ddl ) ) ( |\{ iv_level \}| ) ( iv_status )\
+                            ( |\{ iv_rows \}| ) ( iv_reason ) ) ).\
+  ENDMETHOD.\
+\
+ENDCLASS.\
+\
+START-OF-SELECTION.\
+  IF sy-batch = abap_true AND p_pc = abap_true.\
+    MESSAGE 'A background job cannot save to a PC. Choose the application server option.' TYPE 'S' DISPLAY LIKE 'E'.\
+    RETURN.\
+  ENDIF.\
+  NEW lcl_field_origin( )->run( ).\
+}
