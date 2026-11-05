@@ -754,9 +754,20 @@
     }
   }
 
-  $$(".drawer").forEach((d) => d.addEventListener("click", (e) => {
-    if (e.target === d) d.close();                                      // click on the backdrop
-  }));
+  // A click on the backdrop closes a drawer, but only when the press started there too: selecting
+  // text inside and letting go over the backdrop also gives a click on the dialog itself.
+  const outside = (d, e) => {
+    const r = d.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  };
+  $$(".drawer").forEach((d) => {
+    let pressedOutside = false;
+    d.addEventListener("pointerdown", (e) => { pressedOutside = e.target === d && outside(d, e); });
+    d.addEventListener("click", (e) => {
+      if (pressedOutside && e.target === d && outside(d, e)) d.close();
+      pressedOutside = false;
+    });
+  });
   $("#viewDetail").addEventListener("click", (e) => {
     const b = e.target.closest("[data-product]");
     if (b) openProduct(b.dataset.product, b.dataset.view, b.dataset.match);
