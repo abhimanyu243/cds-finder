@@ -175,12 +175,22 @@ class ViewField(Schema):
     sources: list[FieldSource]
 
 
+class ViewAssociation(Schema):
+    name: str = Field(description="Association name as SAP spells it, e.g. _BusinessPartnerCompany")
+    target: str = Field(description="The view or table it points to")
+    target_description: str = Field(description="Description of the target view, empty when not known")
+    cardinality: str = Field(description="For example 1..1 or 0..*; empty when not stated")
+    condition: str = Field(description="ON condition when the associations file has it, else empty")
+
+
 class ViewDetail(ViewSummary):
     data_definition: str
     detail_level_text: str
     builds_on: list[str]
     tables: list[TableUse]
     fields: list[ViewField]
+    associations: list[ViewAssociation] | None = Field(
+        None, description="Associations the view defines, from DD08B; null when no DD08B file is loaded")
 
 
 class PriorityCount(Schema):

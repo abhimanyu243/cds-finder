@@ -62,6 +62,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         print("No key fields file: the level of detail is not compared")
     print(f"Descriptions: {r['viewsWithDescription']:,} of {r['views']:,} views"
           + ("" if r.get("textsFile") else f" (add a {TEXTS_FILE} file for the rest)"))
+    if r.get("associationsFile"):
+        n = r["viewsWithAssociations"]
+        print(f"Associations: {r['associations']:,} in {n:,} view{'' if n == 1 else 's'}"
+              + (f" ({r['associationViewsNotInFieldOrigin']:,} views not in the field origin file)"
+                 if r["associationViewsNotInFieldOrigin"] else ""))
     if r["duplicateRows"] or r["rowsWithoutName"]:
         print(f"Rows ignored: {r['duplicateRows']:,} repeated, {r['rowsWithoutName']:,} without a view or field name")
     print(f"Loaded in {r['loadSeconds']} s")

@@ -18,14 +18,14 @@ from . import __version__, ranking
 from .errors import NotFound, Unavailable
 from .mappings import MappingRepository
 from .metadata import (
-    EXTRACTION_FILE, FIELD_ORIGIN_FILE, KEY_FIELDS_FILE, TEXTS_FILE, Catalog, LoadError, View, build_catalog,
-    has_metadata,
+    ASSOCIATIONS_FILE, EXTRACTION_FILE, FIELD_ORIGIN_FILE, KEY_FIELDS_FILE, TEXTS_FILE, Association, Catalog,
+    LoadError, View, build_catalog, has_metadata,
 )
 from .products import ProductCatalogue, ProductEntity, load_catalogue, product_title
 from .schemas import (
     DataFile, DataProduct, DataProductEntity, DataProductRef, Meta, Notice, Paging, ProductPage, ProductQuery,
-    ProductSummary, SearchRequest, SearchResponse, TableInput, TableUsage, ViewDetail, ViewRequest, ViewSummary,
-    clamp_page,
+    ProductSummary, SearchRequest, SearchResponse, TableInput, TableUsage, ViewAssociation, ViewDetail, ViewRequest,
+    ViewSummary, clamp_page,
 )
 from .settings import Settings
 
@@ -36,6 +36,7 @@ FILE_DESCRIPTIONS = {
     EXTRACTION_FILE: "Views enabled for data extraction, with delta and release status",
     KEY_FIELDS_FILE: "Identifying fields of each view, used to compare the level of detail",
     TEXTS_FILE: "Description of each view, used when the extraction file has none",
+    ASSOCIATIONS_FILE: "Associations each view defines, shown in the view details",
 }
 CATALOGUE_DESCRIPTION = "Data products with their entities, keys and extraction details"
 RANKING_CACHE_SIZE = 64
@@ -169,7 +170,16 @@ class Finder:
         rank = r.position.get(view.key) if view else None
         if view is None or rank is None:
             raise NotFound(f"{req.name} does not read the tables you searched for.")
-        return self._with_products(ranking.detail(r.matches[rank - 1], rank, self.catalog.keys_loaded), view)
+        detail = ranking.detail(r.matches[rank - 1], rank, self.catalog.keys_loaded)
+        if self.catalog.associations_loaded:
+            detail.associations = [self._association(a) for a in view.associations]
+        return self._with_products(detail, view)
+
+    def _association(self, a: Association) -> ViewAssociation:
+        target = self.catalog.find_view(a.target)
+        return ViewAssociation(name=a.name, target=target.name if target else a.target,
+                               target_description=target.description if target else "",
+                               cardinality=a.cardinality, condition=a.condition)
 
     def export_rows(self, req: SearchRequest) -> list[list]:
         r, matches, _ = self._results(req)

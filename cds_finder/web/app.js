@@ -487,6 +487,16 @@
     if (name) $(`#viewList .item[data-name="${CSS.escape(name)}"]`)?.focus();
   }
 
+  // Associations the view defines (DD08B). Null when that file is not loaded: the section is left out.
+  const associationsBlock = (list) => `
+      <h3>Associations</h3>
+      ${list.length ? `<table class="ttable atable">
+        <thead><tr><th scope="col">Association</th><th scope="col">Cardinality</th></tr></thead>
+        <tbody>${list.map((a) => `<tr>
+          <td class="code">${esc(a.name)}<span class="to"><span aria-hidden="true">→&nbsp;</span><span class="sr">points to </span>${esc(a.target)}</span>${a.targetDescription ? `<span class="calc">${esc(a.targetDescription)}</span>` : ""}${a.condition ? `<span class="calc on">on ${esc(a.condition)}</span>` : ""}</td>
+          <td class="code">${a.cardinality ? esc(a.cardinality) : '<span class="fine">Not stated</span>'}</td></tr>`).join("")}</tbody>
+      </table>` : '<p class="fine">This view defines no associations.</p>'}`;
+
   function renderDetail(v) {
     const n = v.note;
     const extraction = n.capabilities.find((c) => c.label === "Data extraction");
@@ -545,7 +555,8 @@
         <tbody>${v.tables.map((t) => `<tr><td class="code ${t.yours ? "yours" : ""}">${esc(t.table)}${t.yours ? '<span class="mini">Your table</span>' : ""}</td>
           <td class="n">${fmt(t.fields)}${t.calculatedFields ? `<span class="calc">+${fmt(t.calculatedFields)} calculated</span>` : ""}</td>
           <td>${t.direct ? "Direct" : "Through other views"}</td></tr>`).join("")}</tbody>
-      </table>`;
+      </table>
+      ${v.associations ? associationsBlock(v.associations) : ""}`;
 
     const panel = $("#viewDetail");
     panel.innerHTML = `

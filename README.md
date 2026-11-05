@@ -65,6 +65,7 @@ Put these files in the metadata folder (`data/` by default). File names only nee
 | `IXTRCTNENBLDVW` | Yes | DATAEXTRACTIONVIEWNAME, DATAEXTRACTIONVIEWDESCRIPTION, ISSAPRELEASEDVIEW, DELTACHGDATACAPTUREISSUPPORTED | Extraction, delta and release status |
 | `DD03N` | Recommended | STRUCOBJN, FIELDNAME, KEYFLAG | Key fields of each view, for the level of detail check |
 | `DDDDLSRCT` | Optional | DDLNAME, DDLANGUAGE, AS4LOCAL, DDTEXT | Description of each view, used when the extraction file has none |
+| `DD08B` | Optional | STRUCOBJN, ASSOCIATIONNAME, ASSOCNAME_RAW, STRUCOBJN_T, CARD_MIN, CARD_MAX, ON_SOURCE, AS4LOCAL | Associations each view defines, shown in the Details tab |
 | `DataProductCatalogue` | Optional | Product, Entity, CDS view, Entity type, Extraction, Root, Size, Elements, Keys | Which data products use each view, with their keys and extraction details |
 
 The reader is forgiving: column names may differ in case, spaces and underscores (`DELTACHANGEDCAPTUREISSUPPORTED` and `STRUCOBJNM` also work); comma, semicolon, tab and SE16 pipe layouts work, with or without title lines; UTF-8 and Windows-1252 both work; flags count as true for `X`, `TRUE`, `1` or `YES`.
@@ -72,6 +73,8 @@ The reader is forgiving: column names may differ in case, spaces and underscores
 DD03N rows with `KEYFLAG = X` are joined on `DDLNAME = STRUCOBJN` and `ELEMENT_NAME = FIELDNAME`. Client fields (MANDT) are ignored.
 
 DDDDLSRCT rows are joined on `DDLNAME`. Only the active version (`AS4LOCAL = A`) is used, and English text wins when there are several languages. The extraction file's description still comes first; DDDDLSRCT only fills the views that have none.
+
+DD08B rows are joined on `STRUCOBJN` = the view's CDS or DDL name, active version only. Each view shows only the associations it defines itself, not those of the views it builds on. The name comes from `ASSOCNAME_RAW` (SAP's spelling), the cardinality from `CARD_MIN` and `CARD_MAX` (an open upper bound shows as `*`), and the ON condition from `ON_SOURCE` when the system fills it. Without a DD08B file the Details tab looks as before.
 
 If the required files are missing, the app still starts: the page explains that the metadata is not loaded, searches return `503`, and the table mapping can still be maintained.
 
@@ -86,6 +89,7 @@ uv run cds-finder check --data-dir data
 - **Header:** the Deloitte logo and the app name (CDS & Data Product Compass), the three pages (Find Views, Table Mapping, Data Products) with a highlight that slides to the page you open, the data status and the help button. Click either of the last two for the ranking rules, the loaded files and any notes on the data, such as a missing key fields file or repeated catalogue rows. Below 1200 pixels the pages move to a second row.
 - **Find Views:** a short dark hero ("From ECC Tables to the Right CDS View.") with the search card rising into its lower edge. Enter ECC tables, the source (the S/4HANA table, the target, comes from the table mapping unless you type one). The best ranked view is marked "Best match"; extraction and delta show as green pills when available. Below the search card are the ranking rules (P1 green, P2 blue, P3 purple) and the results table with rank, priority, CDS view, description, data product, extraction and delta. The search box, the filter button (sort, custom views, with data product), Compare fields and the export button sit above the table; priorities are tabs; pages are numbered.
 - **Details panel:** selecting a view opens a panel on the right with Show fields and Compare fields buttons and the tabs Overview, Fields, Migration and Details. On narrower screens it opens over the list and closes with Escape.
+- **Associations:** with a DD08B file, the Details tab lists the associations the view defines: name, the view it points to (with its description when known), cardinality, and the ON condition when DD08B has it.
 - **Data product drawer:** selecting a data product anywhere opens a drawer from the right with the tabs Overview, Keys, Extraction and Details, and how many of the product's CDS views are in the loaded view metadata.
 - **Table Mapping:** each row shows the ECC table (grey, the source), an arrow and its S/4HANA tables (green, the target).
 - **Data Products:** every product in the catalogue as a card with its entities, how many are enabled for extraction and how many of its CDS views are in the loaded view metadata. Search by product, entity or CDS view name, or show only products with views in the metadata.

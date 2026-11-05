@@ -414,3 +414,26 @@ def test_notices_describe_what_needs_attention(product_client, tmp_path):
 def test_new_pages_have_no_placeholder_wording(product_client):
     for url in ("/api/data-products", "/api/meta"):
         assert not WORDING.search(product_client.get(url).text)
+
+
+def test_view_detail_lists_associations_only_when_dd08b_is_loaded(client, tmp_path):
+    from .test_metadata import write_associations
+    plain = client.post("/api/view", json={"tables": [{"ecc": "MSEG"}], "name": "I_MaterialDocumentItem_2"}).json()
+    assert plain["associations"] is None                       # no DD08B file: the section stays hidden
+
+    write_associations(tmp_path / "data", (
+        "I_MATERIALDOCUMENTITEM_2,.NODE1,_MATERIALDOCUMENTHEADER,A,I_MATERIALDOCUMENTHEADER_2,.NODE1,B,0,,,1,1,,,"
+        ",_MaterialDocumentHeader,_MATERIALDOCUMENTHEADER,I_MATERIALDOCUMENTITEM_2,,,,\n"
+        "I_MATERIALDOCUMENTITEM_2,.NODE1,_PLANT,A,I_PLANT,.NODE1,B,0,,,0,1,,,,_Plant,_PLANT,,,,,\n"))
+    settings = Settings(data_dir=tmp_path / "data", db_path=tmp_path / "m.db", log_level="WARNING")
+    with TestClient(create_app(settings)) as c:
+        detail = c.post("/api/view", json={"tables": [{"ecc": "MSEG"}], "name": "I_MaterialDocumentItem_2"}).json()
+        cube = c.post("/api/view", json={"tables": [{"ecc": "MSEG"}], "name": "I_GoodsMovementCube"}).json()
+        files = c.get("/api/meta").json()["files"]
+    assert detail["associations"] == [
+        {"name": "_MaterialDocumentHeader", "target": "I_MaterialDocumentHeader_2",
+         "targetDescription": "Material Document Header", "cardinality": "1..1", "condition": ""},
+        {"name": "_Plant", "target": "I_PLANT", "targetDescription": "", "cardinality": "0..1", "condition": ""},
+    ]
+    assert cube["associations"] == []                          # file loaded, view defines none
+    assert {"name": "DD08B.csv", "holds": "Associations each view defines, shown in the view details"} in files

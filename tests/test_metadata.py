@@ -132,3 +132,54 @@ def test_descriptions_from_ddl_source_texts(tmp_path):
     assert after.views[with_ext.key].description == with_ext.description
     assert after.report["textsFile"] == "DDDDLSRCT.csv"
     assert after.report["viewsWithDescription"] == before.report["viewsWithDescription"] + 1
+
+
+DD08B_HEADER = ("STRUCOBJN,NODENAME,ASSOCIATIONNAME,AS4LOCAL,STRUCOBJN_T,NODENAME_T,TYPEKIND_T,ASSOCIATIONKIND,"
+                "CHECKINDICATOR,CARDINALITY,CARD_MIN,CARD_MAX,ASSORIGIN,DOPATH_T,ON_SOURCE,ASSOCNAME_RAW,"
+                "ASSOCNAME_ORIG,STRUCOBJN_S,EXTENDNAME,IS_REDIRECTED,HAS_EXPLICIT_FILTER,DDTEXT\n")
+
+
+def write_associations(folder: Path, rows: str) -> None:
+    """Copy the example metadata into folder and add a DD08B file in the SE16 column layout."""
+    from .conftest import EXAMPLES
+    folder.mkdir(parents=True, exist_ok=True)
+    for src in EXAMPLES.glob("*.csv"):
+        (folder / src.name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    (folder / "DD08B.csv").write_text(DD08B_HEADER + rows, encoding="utf-8")
+
+
+def test_associations_from_dd08b(tmp_path):
+    """Each view gets the associations it defines: active rows only, original spelling, sorted, no repeats."""
+    write_associations(tmp_path / "data", (
+        "I_MATERIALDOCUMENTITEM_2,.NODE1,_MATERIALDOCUMENTHEADER,A,I_MATERIALDOCUMENTHEADER_2,.NODE1,B,0,,,1,1,,,"
+        ",_MaterialDocumentHeader,_MATERIALDOCUMENTHEADER,I_MATERIALDOCUMENTITEM_2,,,,\n"
+        "I_MATERIALDOCUMENTITEM_2,.NODE1,_CURRENCY,A,I_CURRENCY,.NODE1,B,0,,,0,2147483647,,,"
+        '"_Currency.Currency =\n  $projection.CompanyCodeCurrency",_Currency,_CURRENCY,I_MATERIALDOCUMENTITEM_2,,,,\n'
+        "I_MATERIALDOCUMENTITEM_2,.NODE1,_OLDNAME,N,I_PLANT,.NODE1,B,0,,,0,1,,,,_OldName,_OLDNAME,,,,,\n"
+        "I_MATERIALDOCUMENTITEM_2,.NODE1,_CURRENCY,A,I_CURRENCY,.NODE1,B,0,,,0,1,,,,_Currency,_CURRENCY,,,,,\n"
+        "I_NOTINTHEFIELDORIGIN,.NODE1,_PLANT,A,I_PLANT,.NODE1,B,0,,,0,1,,,,_Plant,_PLANT,,,,,\n"))
+    catalog = build_catalog(tmp_path / "data")
+    view = catalog.find_view("I_MaterialDocumentItem_2")
+    assert catalog.associations_loaded
+    assert [(a.name, a.target, a.cardinality, a.condition) for a in view.associations] == [
+        ("_Currency", "I_CURRENCY", "0..*", "_Currency.Currency = $projection.CompanyCodeCurrency"),
+        ("_MaterialDocumentHeader", "I_MATERIALDOCUMENTHEADER_2", "1..1", ""),
+    ]
+    assert catalog.find_view("I_GoodsMovementCube").associations == ()
+    r = catalog.report
+    assert (r["associationsFile"], r["associations"], r["viewsWithAssociations"],
+            r["associationViewsNotInFieldOrigin"]) == ("DD08B.csv", 2, 1, 1)
+
+
+def test_catalog_without_associations_file(catalog):
+    assert not catalog.associations_loaded and catalog.report["associationsFile"] is None
+    assert all(v.associations == () for v in catalog.views.values())
+
+
+@pytest.mark.parametrize(("low", "high", "text"), [
+    ("1", "1", "1..1"), ("0", "1", "0..1"), ("0", "5", "0..5"), ("0", "0", "0..*"), ("1", "1-", "1..*"),
+    ("0", "2147483647", "0..*"), ("0", "2,147,483,647", "0..*"), ("0", "2.147.483.647", "0..*"), ("", "1", "0..1"), ("1", "", ""), ("", "", ""),
+])
+def test_cardinality_reads_card_min_and_card_max(low, high, text):
+    from cds_finder.metadata import cardinality
+    assert cardinality(low, high) == text

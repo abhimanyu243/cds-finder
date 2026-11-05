@@ -13,6 +13,8 @@ Inputs
   DD03N            : STRUCOBJN, FIELDNAME, KEYFLAG (fields of CDS views; KEYFLAG = X
                      marks the view's key). Joined on DDLNAME = STRUCOBJN and
                      ELEMENT_NAME = FIELDNAME.
+  DD08B (optional) : STRUCOBJN, ASSOCIATIONNAME, ASSOCNAME_RAW, STRUCOBJN_T, CARD_MIN,
+                     CARD_MAX, ON_SOURCE, AS4LOCAL (one row per association a view defines)
 
 Column names are matched loosely (case, spaces and underscores are ignored),
 and comma, semicolon, tab and SE16 pipe layouts are all accepted.
@@ -35,6 +37,7 @@ FIELD_ORIGIN_FILE = "CDS_FIELD_ORIGIN"
 EXTRACTION_FILE = "IXTRCTNENBLDVW"
 KEY_FIELDS_FILE = "DD03N"
 TEXTS_FILE = "DDDDLSRCT"          # optional: description of each DDL source
+ASSOCIATIONS_FILE = "DD08B"       # optional: associations each view defines
 TEXT_LANGUAGE = "E"               # language used for descriptions when the file has several
 DATA_SUFFIXES = (".csv", ".txt", ".tsv")
 CLIENT_FIELDS = frozenset({"MANDT", "CLIENT", "RCLNT", "MANDANT"})   # never treated as business keys
@@ -249,6 +252,14 @@ class ExtractionInfo:
     delta: bool              # change data capture supported
 
 
+@dataclass(frozen=True, slots=True)
+class Association:
+    name: str                # as SAP spells it, e.g. _BusinessPartnerCompany
+    target: str              # view or table it points to, as in DD08B (upper case)
+    cardinality: str         # '1..1', '0..*', or '' when not stated
+    condition: str           # ON condition, '' when DD08B leaves it empty
+
+
 @dataclass(slots=True)
 class View:
     key: str                 # upper-case entity name, used for lookups
@@ -261,6 +272,7 @@ class View:
     key_rows: int = 0            # key fields found for this view in DD03N
     keys: list[Element] = field(default_factory=list)   # key elements in view order
     text: str = ""               # description from DDDDLSRCT
+    associations: tuple[Association, ...] = ()    # from DD08B, sorted by name
 
     @property
     def description(self) -> str:
@@ -283,6 +295,7 @@ class Catalog:
     table_index: dict[str, list[str]]           # table -> view keys that read it
     report: dict
     keys_loaded: bool = False                   # True when a key fields file was read
+    associations_loaded: bool = False           # True when an associations file was read
 
     @property
     def loaded(self) -> bool:
@@ -519,6 +532,69 @@ def _apply_view_keys(path: Path, views: dict[str, View], alias: dict[str, str]) 
     return report, stats
 
 
+ASSOCIATION_COLUMNS = (
+    Column("STRUCOBJN", ("STRUCOBJN",)),
+    Column("NAME", ("ASSOCIATIONNAME",)),
+    Column("TARGET", ("STRUCOBJNT",)),
+    Column("RAW_NAME", ("ASSOCNAMERAW",), required=False),
+    Column("CARD_MIN", ("CARDMIN",), required=False),
+    Column("CARD_MAX", ("CARDMAX",), required=False),
+    Column("CONDITION", ("ONSOURCE",), required=False),
+    Column("VERSION", ("AS4LOCAL",), required=False),
+)
+INT4_MAX = 2_147_483_647
+
+
+def _number(text: str) -> int:
+    """'1' -> 1, '2.147.483.647' -> 2147483647, '1-' (SAP's trailing minus) -> -1. ValueError if no digits."""
+    text = text.strip()
+    value = int(re.sub(r"\D", "", text))
+    return -value if text.startswith("-") or text.endswith("-") else value
+
+
+def cardinality(low: str, high: str) -> str:
+    """CARD_MIN and CARD_MAX as CDS writes them: '1..1', '0..*'. An open upper bound
+    (0, negative or the INT4 maximum) shows as '*'. Empty when not stated."""
+    try:
+        lo, hi = _number(low or "0"), _number(high)
+    except ValueError:
+        return ""
+    return f"{lo}..{'*' if hi <= 0 or hi >= INT4_MAX else hi}"
+
+
+def _apply_associations(path: Path, views: dict[str, View], alias: dict[str, str]) -> tuple[FileReport, dict]:
+    """Give each view the associations it defines: STRUCOBJN = the view's CDS or DDL name. Active version only."""
+    found: dict[str, dict[str, Association]] = {}
+    unknown: set[str] = set()
+
+    def consume(rows: Iterator[dict[str, str]]) -> None:
+        found.clear()
+        unknown.clear()
+        intern = sys.intern
+        for row in rows:
+            obj, name, target = row["STRUCOBJN"].upper(), row.get("RAW_NAME") or row["NAME"], row["TARGET"]
+            if not obj or not name or not target or row.get("VERSION", "A").upper() not in ("A", ""):
+                continue
+            vkey = alias.get(obj)
+            if vkey is None:
+                unknown.add(obj)
+                continue
+            found.setdefault(vkey, {}).setdefault(name.upper(), Association(
+                name=intern(name), target=intern(target.upper()),
+                cardinality=intern(cardinality(row.get("CARD_MIN", ""), row.get("CARD_MAX", ""))),
+                condition=" ".join(row.get("CONDITION", "").split())))
+
+    report = stream_file(path, ASSOCIATION_COLUMNS, consume)
+    for vkey, by_name in found.items():
+        views[vkey].associations = tuple(sorted(by_name.values(), key=lambda a: a.name.upper()))
+    stats = {
+        "associations": sum(len(v) for v in found.values()),
+        "viewsWithAssociations": len(found),
+        "associationViewsNotInFieldOrigin": len(unknown),
+    }
+    return report, stats
+
+
 def has_metadata(data_dir: Path) -> bool:
     return bool(find_data_file(data_dir, FIELD_ORIGIN_FILE) and find_data_file(data_dir, EXTRACTION_FILE))
 
@@ -576,6 +652,12 @@ def _build_catalog(data_dir: Path) -> Catalog:
         for v in views.values():
             v.text = texts.get(v.ddlname) or texts.get(v.key, "")
 
+    assoc_stats: dict = {}
+    assoc_path = find_data_file(data_dir, ASSOCIATIONS_FILE)
+    if assoc_path:
+        assoc_report, assoc_stats = _apply_associations(assoc_path, views, sink.alias)
+        files.append(assoc_report)
+
     table_index: dict[str, list[str]] = {}
     for v in views.values():
         for t in v.tables:
@@ -588,6 +670,8 @@ def _build_catalog(data_dir: Path) -> Catalog:
         "files": [f.as_dict() for f in files],
         "dd03nFile": dd03n_path.name if dd03n_path else None,
         "textsFile": texts_path.name if texts_path else None,
+        "associationsFile": assoc_path.name if assoc_path else None,
+        **assoc_stats,
         "viewsWithDescription": sum(1 for v in views.values() if v.description),
         **key_stats,
         "views": len(views),
@@ -602,7 +686,8 @@ def _build_catalog(data_dir: Path) -> Catalog:
         "loadSeconds": round(time.perf_counter() - started, 2),
         "loadedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    return Catalog(views, table_index, report, keys_loaded=bool(dd03n_path))
+    return Catalog(views, table_index, report, keys_loaded=bool(dd03n_path),
+                   associations_loaded=bool(assoc_path))
 
 
 def read_rows(path: Path, columns: tuple[Column, ...]) -> list[dict[str, str]]:

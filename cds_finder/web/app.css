@@ -437,6 +437,9 @@ main:focus { outline: none; }
 .ttable th:last-child, .ttable td:last-child { width: 1%; padding-right: 0; padding-left: 12px; white-space: nowrap; }
 .ttable td.code { overflow-wrap: anywhere; }
 .ttable .calc { display: block; color: var(--ink-3); font-size: 12px; }
+.atable .to { display: block; margin-top: 2px; color: var(--ink-2); font-size: 12.5px; }
+.atable .calc { margin-top: 2px; font-family: var(--font); }
+.atable .calc.on { font-family: var(--mono); }
 .n { text-align: right; font-variant-numeric: tabular-nums; }
 .yours { color: var(--green-dark); font-weight: 650; }
 .mini { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 5px; background: var(--green-tint); color: var(--green-dark); font: 600 11px/17px var(--font); vertical-align: 1px; }
