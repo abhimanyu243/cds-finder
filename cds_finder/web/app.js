@@ -579,13 +579,14 @@
       </div>`;
     tabs(panel);
 
+    const keysFirst = [...v.fields.filter((f) => f.key), ...v.fields.filter((f) => !f.key)];
     const draw = () => {
       const term = $("#fieldFilter").value.trim().toUpperCase();
       const mine = $("#onlyMine").checked;
       const yours = new Set(v.tables.filter((t) => t.yours).map((t) => t.table));
-      const rows = v.fields.map((f, i) => [f, i + 1]).filter(([f]) => (!mine || f.fromYourTables) &&
+      const rows = keysFirst.map((f, i) => [f, i + 1]).filter(([f]) => (!mine || f.fromYourTables) &&
         (!term || f.name.toUpperCase().includes(term) || f.sources.some((s) => `${s.table}.${s.field}`.includes(term))));
-      $("#fieldCount").textContent = rows.length === v.fields.length ? `(${fmt(v.fields.length)})` : `(${fmt(rows.length)} of ${fmt(v.fields.length)})`;
+      $("#fieldCount").textContent = rows.length === keysFirst.length ? `(${fmt(keysFirst.length)})` : `(${fmt(rows.length)} of ${fmt(keysFirst.length)})`;
       $("#fieldRows").innerHTML = rows.length ? rows.map(([f, i]) => `
         <tr class="${f.fromYourTables ? "mine" : ""}">
           <td class="n fine">${i}</td>
