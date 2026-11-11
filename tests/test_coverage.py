@@ -255,3 +255,120 @@ def test_p1_views_come_first_even_when_a_lower_priority_view_has_more_fields(tmp
         assert picked["comparison"]["verdict"][0].startswith("I_ITEMWIDE adds F2, which I_ITEMONE lacks")
         alone = compare(c, ["F3"], tables=[{"ecc": "TABX"}]).json()["summary"]
         assert alone["best"]["name"] == "I_ITEMWIDE" and alone["moreFields"] is None   # no P1 view has it: P2
+
+
+def test_top_view_of_each_priority_for_each_table(tmp_path):
+    """TABX has P1, P2 and P3 views, TABY only P2 and P3. Per table and priority the view with the most
+    fields of that table is listed; on equal counts the better ranked view wins."""
+    from fastapi.testclient import TestClient
+
+    from cds_finder.api import create_app
+    from cds_finder.settings import Settings
+    data = tmp_path / "data"
+    data.mkdir()
+    lineage = {"I_XONE": [("TABX", "F1")], "I_XTWO": [("TABX", "F1"), ("TABX", "F2")],
+               "I_XWIDE": [("TABX", "F1"), ("TABX", "F2"), ("TABX", "F3")],
+               "I_YVIEW": [("TABY", "G1")], "I_YVIEWB": [("TABY", "G1")],
+               "Z_EXTRA": [("TABX", "F1"), ("TABY", "G1")]}
+    (data / "CDS_FIELD_ORIGIN.csv").write_text(
+        "DDLNAME,LEVEL,ENTITY_NAME,ELEMENT_NAME,BASE_OBJECT,BASE_FIELD,IS_CALCULATED\n"
+        + "".join(f"{v},1,{v},{t}{f},{t},{f},\n" for v, cols in lineage.items() for t, f in cols), encoding="utf-8")
+    (data / "IXTRCTNENBLDVW.csv").write_text(
+        "DATAEXTRACTIONVIEWNAME,DATAEXTRACTIONVIEWDESCRIPTION,ISSAPRELEASEDVIEW,DELTACHGDATACAPTUREISSUPPORTED\n"
+        "I_XONE,One,X,X\nI_XTWO,Two,X,X\n", encoding="utf-8")
+    with TestClient(create_app(Settings(data_dir=data, db_path=tmp_path / "m.db", log_level="WARNING"))) as c:
+        r = compare(c, ["TABX-F1", "TABX-F2", "TABX-F3", "TABY-G1"], tables=[]).json()
+        rank = {v["name"]: v["rank"] for v in r["views"]}
+        by_table = {t["table"]: t for t in r["byTable"]}
+        assert list(by_table) == ["TABX", "TABY"]
+        assert by_table["TABX"]["fields"] == ["TABX-F1", "TABX-F2", "TABX-F3"]
+        assert [(p["priority"], p["view"]["name"], p["tableCovered"]) for p in by_table["TABX"]["picks"]] == [
+            (1, "I_XTWO", 2), (2, "I_XWIDE", 3), (3, "Z_EXTRA", 1)]
+        y = by_table["TABY"]["picks"]
+        assert [(p["priority"], p["tableCovered"]) for p in y] == [(2, 1), (3, 1)]       # no P1 view for TABY
+        assert y[0]["view"]["name"] == min(("I_YVIEW", "I_YVIEWB"), key=rank.get)      # tie: the better rank
+        assert y[1]["view"]["covered"] == 2                                             # Z_EXTRA has 2 of all 4
+
+
+def test_fields_without_a_table_are_grouped_under_the_searched_tables(client):
+    r = compare(client, ["MATNR", "MKPF-USNAM", "ZZNOTHERE"]).json()
+    groups = {t["table"]: t for t in r["byTable"]}
+    assert list(groups) == ["MSEG", "MKPF"]
+    assert groups["MSEG"]["fields"] == ["MATNR", "ZZNOTHERE"]
+    assert groups["MSEG"]["picks"][0]["priority"] == min(p["priority"] for p in groups["MSEG"]["picks"])
+    assert all(p["tableCovered"] == 1 for p in groups["MSEG"]["picks"])               # ZZNOTHERE is in no view
+
+
+def test_by_table_uses_each_tables_own_ranking(tmp_path):
+    """The pick is the first view of its priority in a search for that table alone that has one of the
+    table's fields, and it shows that search's rank. A view that leads the combined ranking because it
+    reads both tables, or one with more of the fields, does not jump ahead."""
+    from fastapi.testclient import TestClient
+
+    from cds_finder.api import create_app
+    from cds_finder.settings import Settings
+    data = tmp_path / "data"
+    data.mkdir()
+    lineage = {"I_BOTH": [("TABX", "F1"), ("TABY", "G1")], "I_YONLY": [("TABY", "G1")],
+               "I_YOTHER": [("TABY", "G9")],
+               "I_XONE": [("TABX", "F1"), ("TABX", "F7"), ("TABX", "F8"), ("TABX", "F9")],
+               "I_XWIDE": [("TABX", "F1"), ("TABX", "F2"), ("TABZ", "H1"), ("TABW", "K1")]}
+    (data / "CDS_FIELD_ORIGIN.csv").write_text(
+        "DDLNAME,LEVEL,ENTITY_NAME,ELEMENT_NAME,BASE_OBJECT,BASE_FIELD,IS_CALCULATED\n"
+        + "".join(f"{v},1,{v},{t}{f},{t},{f},\n" for v, cols in lineage.items() for t, f in cols), encoding="utf-8")
+    (data / "IXTRCTNENBLDVW.csv").write_text(
+        "DATAEXTRACTIONVIEWNAME,DATAEXTRACTIONVIEWDESCRIPTION,ISSAPRELEASEDVIEW,DELTACHGDATACAPTUREISSUPPORTED\n",
+        encoding="utf-8")
+    wanted = {"TABX": {"F1", "F2"}, "TABY": {"G1"}}
+    with TestClient(create_app(Settings(data_dir=data, db_path=tmp_path / "m.db", log_level="WARNING"))) as c:
+        r = compare(c, ["TABX-F1", "TABX-F2", "TABY-G1"], tables=[{"ecc": "TABX"}]).json()
+        assert r["views"][0]["name"] == "I_BOTH"                      # leads the combined ranking
+        for group in r["byTable"]:
+            table = group["table"]
+            own = c.post("/api/search", json={"tables": [{"ecc": table}], "pageSize": 100}).json()["results"]
+            has = [v for v in own if any(t == table and f in wanted[table] for t, f in lineage[v["name"].upper()])]
+            shown = [(p["view"]["name"], p["view"]["rank"]) for p in group["picks"]]
+            assert shown == [(has[0]["name"], has[0]["rank"])]
+        picks = {g["table"]: g["picks"][0] for g in r["byTable"]}
+        assert picks["TABY"]["view"]["name"] == "I_YONLY"             # not I_BOTH, and not I_YOTHER (no G1)
+        assert picks["TABX"]["tableCovered"] == 1                     # the better ranked view wins over I_XWIDE's 2
+
+
+def test_driver_view_is_joined_first_then_the_other_views(tmp_path):
+    """I_B shares a key field with the driver I_A. I_C shares none with it, so it falls back to I_B."""
+    from fastapi.testclient import TestClient
+
+    from cds_finder.api import create_app
+    from cds_finder.settings import Settings
+    data = tmp_path / "data"
+    data.mkdir()
+    lineage = {"I_A": [("TABA", "K1"), ("TABA", "B1")], "I_B": [("TABB", "B1"), ("TABB", "C1")],
+               "I_C": [("TABC", "C1"), ("TABC", "V1")]}
+    (data / "CDS_FIELD_ORIGIN.csv").write_text(
+        "DDLNAME,LEVEL,ENTITY_NAME,ELEMENT_NAME,BASE_OBJECT,BASE_FIELD,IS_CALCULATED\n"
+        + "".join(f"{v},1,{v},{t}{f},{t},{f},\n" for v, cols in lineage.items() for t, f in cols), encoding="utf-8")
+    (data / "IXTRCTNENBLDVW.csv").write_text(
+        "DATAEXTRACTIONVIEWNAME,DATAEXTRACTIONVIEWDESCRIPTION,ISSAPRELEASEDVIEW,DELTACHGDATACAPTUREISSUPPORTED\n",
+        encoding="utf-8")
+    (data / "DD03N.csv").write_text("STRUCOBJN,FIELDNAME,KEYFLAG\nI_A,TABAK1,X\nI_B,TABBB1,X\nI_C,TABCC1,X\n",
+                                    encoding="utf-8")
+    fields = ["TABA-K1", "TABB-C1", "TABC-V1"]
+    with TestClient(create_app(Settings(data_dir=data, db_path=tmp_path / "m.db", log_level="WARNING"))) as c:
+        r = compare(c, fields, tables=[], compare=["I_C", "I_B", "I_A"], driver="I_A").json()["comparison"]
+        assert [(j["left"], j["right"], bool(j["pairs"])) for j in r["joins"]] == [
+            ("I_A", "I_B", True), ("I_B", "I_C", True)]
+        assert r["recommended"] is None and r["verdict"][0].startswith("I_A is the view of your driver table")
+        assert [v["name"] for v in r["views"]] == ["I_C", "I_B", "I_A"]              # columns keep their order
+        bad = compare(c, fields, tables=[], compare=["I_B", "I_C"], driver="I_A")
+        assert bad.status_code == 400 and "not one of the views" in bad.json()["detail"]
+
+
+def test_driver_does_not_change_how_two_views_join(client):
+    """The driver decides which view is tried first. The join fields stay the best key match: the header
+    is looked up by its full key, not the item view by part of its key."""
+    views = ["I_MaterialDocumentItem_2", "I_MaterialDocumentHeader_2"]
+    fields = ["MSEG-MATNR", "MKPF-USNAM"]
+    free = compare(client, fields, compare=views).json()["comparison"]["joins"]
+    for driver in views:
+        driven = compare(client, fields, compare=views, driver=driver).json()["comparison"]["joins"]
+        assert driven == free and driven[0]["complete"]

@@ -53,7 +53,7 @@
   function coverage(b) {
     const cov = DATA.coverage[`${key(b.tables)}|${(b.fields || []).join(" ")}`];
     if (!cov) return notHere(MSG.fields);
-    const comparison = cov.comparisons[(b.compare || []).join(",")];
+    const comparison = cov.comparisons[(b.compare || []).join(",") + (b.driver ? `|${b.driver}` : "")];
     return comparison ? json({ ...cov.base, comparison }) : notHere(MSG.pick);
   }
 

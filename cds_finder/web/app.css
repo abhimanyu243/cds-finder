@@ -575,6 +575,13 @@ main:focus { outline: none; }
 .vlist .rank-num { margin-right: 4px; }
 .vlist tbody tr:hover td { background: var(--hover); }
 .fields-panels .results-foot { padding: 12px 0 0; }
+.btable th:first-child, .btable td:first-child { width: 58px; padding-right: 6px; }
+.btable input[type=radio] { width: 16px; height: 16px; accent-color: var(--green); }
+.btable .segmented { flex-wrap: nowrap; }
+.sel-title { margin: 18px 0 4px; font-size: 13.5px; }
+.sel-title + .fine { margin-bottom: 10px; }
+.btable .segmented button { height: 28px; padding: 0 11px; }
+.segmented button:disabled { color: var(--ink-3); opacity: .45; cursor: not-allowed; }
 .flist { margin: 0; padding: 0; list-style: none; }
 .flist li { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 2px; border-bottom: 1px solid var(--line); font-size: 13.5px; }
 .flist li:last-child { border-bottom: 0; }

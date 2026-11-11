@@ -84,6 +84,16 @@ def record_comparison(c: TestClient, data: dict, tables: list[dict], fields: lis
         for chosen in itertools.combinations(names, size):
             comparisons[",".join(chosen)] = c.post("/api/coverage", json={**body, "compare": list(chosen)}).json()[
                 "comparison"]
+    # every P1/P2/P3 choice under By table, with each table as the driver, as the page sends it:
+    # views in table order without repeats, and the driver table's view
+    tops = [[p["view"]["name"] for p in t["picks"]] for t in base["byTable"] if t["picks"]]
+    for choice in itertools.product(*tops):
+        chosen = list(dict.fromkeys(choice))
+        if len(chosen) > MAX_COMPARE:
+            continue
+        for driver in chosen:
+            answer = c.post("/api/coverage", json={**body, "compare": chosen, "driver": driver}).json()
+            comparisons[f"{','.join(chosen)}|{driver}"] = answer["comparison"]
     k = f"{key(tables)}|{' '.join(fields)}"
     data["coverage"][k] = {"base": base, "comparisons": comparisons}
     data["coverageExports"][k] = download(c.post("/api/coverage/export", json=body))

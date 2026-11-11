@@ -9,6 +9,9 @@ calculation is reported separately and does not count as provided.
 Views are taken by priority: P1 views first, then P2, then P3. The best view is the P1 view with
 the most fields (P2 only when no P1 view has any of them), and the views used together are
 picked from P1 first, adding P2 and then P3 only for the fields the higher priority cannot give.
+For each table the fields name, the top view of each priority is listed too: the best ranked view in a
+search for that table alone that has at least one of its fields. The user switches between them without
+paging through every view.
 
 The side-by-side comparison also helps choose between views: it lists the facts the ranking
 uses (extraction, delta, release, level of detail...), says in words which view to prefer and
@@ -48,6 +51,9 @@ class CoverageRequest(Schema):
     fields: list[str] = Field(default_factory=list, description="VBAP-NETWR, VBAP.NETWR, or NETWR after a search")
     compare: list[str] = Field(default_factory=list, max_length=MAX_COMPARE,
                                description="Views to show side by side; empty means the suggested combination")
+    driver: str = Field("", description="One of the compared views: the view of the driver table. The other "
+                                        "views are joined to it first, and to each other only when they share "
+                                        "no key field with it")
 
 
 class WantedField(Schema):
@@ -135,10 +141,23 @@ class Comparison(Schema):
     joins: list[JoinHint] = Field(description="How to join views that add fields the main view lacks")
 
 
+class TablePick(Schema):
+    priority: PriorityLevel
+    view: ViewCoverage = Field(description="Best ranked view of this priority; rank is the table's own rank")
+    table_covered: int = Field(description="Fields of this table the view provides")
+
+
+class TableViews(Schema):
+    table: str = Field(description="ECC table; for fields given without a table, the searched tables")
+    fields: list[str] = Field(description="The requested fields of this table")
+    picks: list[TablePick] = Field(description="Top view of each priority that has one, P1 first")
+
+
 class CoverageResponse(Schema):
     inputs: list[ResolvedTable]
     fields: list[WantedField]
     summary: CoverageSummary
+    by_table: list[TableViews] = Field(description="Per table, the top P1, P2 and P3 view for its fields")
     views: list[ViewCoverage] = Field(description="Views that provide at least one field: P1 first, then the "
                                                   "most fields")
     views_found: int = Field(description="All views that read the tables")
@@ -287,8 +306,35 @@ def compare(finder: Finder, req: CoverageRequest) -> CoverageResponse:
                                 more_fields=most if most and most.covered > best.covered else None),
         views=views,
         views_found=len(run.ranked.matches),
-        comparison=_comparison(finder, run, chosen),
+        comparison=_comparison(finder, run, chosen, req.driver if req.compare else ""),
+        by_table=_by_table(finder, req, run, yes_sets),
     )
+
+
+def _by_table(finder: Finder, req: CoverageRequest, run: _Run, yes_sets: list[set[int]]) -> list[TableViews]:
+    """Group the fields by table. Per priority, pick the best ranked view that provides at least one of
+    the table's fields, ranked as a search for that table alone ranks it, so the rank shown here is the
+    rank on the Find Views page. Fields without a table use the ranking of the searched tables."""
+    groups: dict[str, set[int]] = {}
+    for i, w in enumerate(run.wanted):
+        groups.setdefault(w.table, set()).add(i)
+    provided = {m.view.key: (k, yes) for k, ((m, _), yes) in enumerate(zip(run.scans, yes_sets, strict=True)) if yes}
+    searched = {t.ecc: t for t in req.tables}
+    result = []
+    for table, idx in groups.items():
+        own = finder.ranking([searched.get(table) or TableInput(ecc=table)]) if table else run.ranked   # cached
+        picks: dict[int, TablePick] = {}
+        for m in own.matches:                              # in rank order: the first hit per priority wins
+            hit = provided.get(m.view.key)
+            if m.priority in picks or hit is None or not hit[1] & idx:
+                continue
+            view = _view(run, *run.scans[hit[0]]).model_copy(update={"rank": own.position[m.view.key]})
+            picks[m.priority] = TablePick(priority=m.priority, view=view, table_covered=len(hit[1] & idx))
+            if len(picks) == len(ranking.PRIORITY_LABEL):
+                break
+        result.append(TableViews(table=table or ", ".join(searched), fields=[run.wanted[i].label for i in sorted(idx)],
+                                 picks=[picks[level] for level in sorted(picks)]))
+    return result
 
 
 def _combination(candidates: list[tuple[str, int, set[int]]], coverable: set[int]) -> Combination:
@@ -311,7 +357,7 @@ def _combination(candidates: list[tuple[str, int, set[int]]], coverable: set[int
     return Combination(views=picked, covered=len(have))
 
 
-def _comparison(finder: Finder, run: _Run, names: list[str]) -> Comparison:
+def _comparison(finder: Finder, run: _Run, names: list[str], driver: str = "") -> Comparison:
     """Requested fields down the side, chosen views across, with the facts and advice to choose between them."""
     by_name = {m.view.key: (m, found) for m, found in run.scans}
     cols = []
@@ -320,12 +366,23 @@ def _comparison(finder: Finder, run: _Run, names: list[str]) -> Comparison:
             raise BadRequest(f"{name} does not read the tables you are comparing.")
         cols.append(by_name[name.upper()])
     recommended, verdict, added = _verdict(run, cols)
+    by_driver = bool(driver.strip())
+    if by_driver:
+        main = by_name.get(driver.strip().upper())
+        if main not in cols:
+            raise BadRequest(f"{driver.strip()} is not one of the views you are comparing.")
+        # the user named the driver: keep its rows and join every other chosen view, driver first
+        added = [main[0].view, *(m.view for m, _ in cols if m is not main[0])] if len(cols) > 1 else []
+        recommended = None
+        verdict = [f"{main[0].view.name} is the view of your driver table. Each other view is joined to it "
+                   "first, and to another view only when it shares no key field with it. The join fields are the same "
+                   "whichever table is the driver."] if added else []
     return Comparison(
         views=[_compared(finder, run, m, found) for m, found in cols],
         rows=[CompareRow(label=w.label, cells=[Cell(status=found[i][0], element=found[i][1]) if i in found
                                                 else Cell(status="no") for _, found in cols])
               for i, w in enumerate(run.wanted)],
-        recommended=recommended, verdict=verdict, joins=_joins(added, finder.catalog.keys_loaded))
+        recommended=recommended, verdict=verdict, joins=_joins(added, finder.catalog.keys_loaded, by_driver))
 
 
 def _compared(finder: Finder, run: _Run, m: ranking.Match, found: Found) -> ComparedView:
@@ -431,12 +488,27 @@ def _join(a: View, b: View, keys_loaded: bool) -> JoinHint:
     return JoinHint(left=left.name, right=right.name, pairs=pairs, complete=complete, note=note)
 
 
-def _joins(views: list[View], keys_loaded: bool) -> list[JoinHint]:
-    """Join each view after the first to the first view it shares a key with (the main view if possible)."""
-    hints = []
-    for k in range(1, len(views)):
-        tried = [_join(views[j], views[k], keys_loaded) for j in range(k)]
-        hints.append(next((h for h in tried if h.pairs), tried[0]))
+def _joins(views: list[View], keys_loaded: bool, by_driver: bool = False) -> list[JoinHint]:
+    """Join each view after the first to the first view it shares a key with: the main view if possible,
+    else the views before it. With a driver (the first view), a view that only connects through another
+    view waits until that view is joined, so the order of the views does not matter. The driver decides
+    which view is tried first, never the join fields: two views always join on their best key match."""
+    if not by_driver:
+        hints = []
+        for k in range(1, len(views)):
+            tried = [_join(views[j], views[k], keys_loaded) for j in range(k)]
+            hints.append(next((h for h in tried if h.pairs), tried[0]))
+        return hints
+    joined, waiting, hints = views[:1], views[1:], []
+    while waiting:
+        found = next(((v, h) for v in waiting for h in (_join(j, v, keys_loaded) for j in joined)
+                      if h.pairs), None)
+        if found is None:                                  # nothing left connects: say so for each
+            return hints + [_join(views[0], v, keys_loaded) for v in waiting]
+        view, hint = found
+        hints.append(hint)
+        joined.append(view)
+        waiting.remove(view)
     return hints
 
 

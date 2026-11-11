@@ -834,7 +834,8 @@
   const FIELD_PAGE = 20;
   const HEADER = /^(TABLE|TABNAME|TABLE NAME|TABLE_NAME|FIELD|FIELDNAME|FIELD NAME|FIELD_NAME|FIELDS)$/;
   const fieldsInput = $("#fieldsInput");
-  const cmp = { tables: [], fields: [], res: null, chosen: false, page: 1, picked: new Set(), seq: 0 };
+  const cmp = { tables: [], fields: [], res: null, chosen: false, page: 1, picked: new Set(), levels: [], seq: 0,
+    sel: { key: "", comparison: null }, driver: 0 };   // driver: row of the driver table under By table              // join advice for the views chosen under By table
 
   const clean = (c) => c.trim().replace(/^"(.*)"$/, "$1").trim();
   const unique = (list) => [...new Set(list.filter(Boolean).map((t) => t.toUpperCase()))];
@@ -905,7 +906,7 @@
     $("#fieldsError").hidden = false;
   }
 
-  async function compareFields(compare = []) {
+  async function compareFields(compare = [], driver = "") {
     const fields = readFieldText(fieldsInput.value);
     $("#fieldsError").hidden = true;
     if (!fields.length) { fieldsError("Enter at least one field."); fieldsInput.focus(); return; }
@@ -917,11 +918,17 @@
     if (cmp.res) out.classList.add("refreshing");
     else out.innerHTML = SKELETON_PANEL;
     try {
-      const res = await api("/api/coverage", { method: "POST", body: { tables: cmp.tables, fields, compare } });
+      const res = await api("/api/coverage", { method: "POST", body: { tables: cmp.tables, fields, compare, driver } });
       if (seq !== cmp.seq) return;
       const fresh = !cmp.res || fields.join() !== cmp.fields.join();
       Object.assign(cmp, { fields, res, chosen: compare.length > 0 });
-      if (fresh) { cmp.page = 1; cmp.picked = new Set(res.comparison.views.map((v) => v.name)); }
+      if (fresh) {
+        cmp.page = 1;
+        cmp.picked = new Set(res.comparison.views.map((v) => v.name));
+        cmp.levels = res.byTable.map((t) => t.picks[0]?.priority ?? 0);   // highest priority first
+        cmp.sel = { key: "", comparison: null };
+        cmp.driver = Math.max(0, res.byTable.findIndex((t) => t.picks.length));
+      }
       renderFields();
     } catch (err) {
       if (seq !== cmp.seq) return;
@@ -966,8 +973,8 @@
         <div class="stat"><b>${fmt(gaps.length + calcOnly.length)}</b><span>Fields no view provides</span></div>
       </div>
       <ul class="findings">${findings}</ul>
-      <div class="fields-tabs">${tabBar("fc", ["Side by side", `All views (${fmt(res.views.length)})`, "Your fields"])}</div>
-      <div class="fields-panels">${tabPanel("fc", 0, fieldMatrix())}${tabPanel("fc", 1, fieldViews())}${tabPanel("fc", 2, fieldList())}</div>
+      <div class="fields-tabs">${tabBar("fc", ["Side by side", "By table", `All views (${fmt(res.views.length)})`, "Your fields"])}</div>
+      <div class="fields-panels">${tabPanel("fc", 0, fieldMatrix())}${tabPanel("fc", 1, byTable())}${tabPanel("fc", 2, fieldViews())}${tabPanel("fc", 3, fieldList())}</div>
       <div class="fields-foot"><button type="button" class="btn" id="fieldsExport">${ICON.download}Export CSV</button>
         <span class="fine">One row per view, with the fields it misses.</span></div>`;
     tabs(out);
@@ -995,8 +1002,14 @@
     ${j.pairs.length ? `<span class="join-pairs">${j.pairs.map((p) => `<span><span class="code">${esc(j.left)}.${esc(p.left)}</span><span class="code">= ${esc(j.right)}.${esc(p.right)}</span>
       <span class="fine">${esc(p.via)}</span></span>`).join("")}</span>` : ""}${esc(j.note)}</li>`;
 
+  // Which view to choose or how to use them together, then how to join them
+  const adviceItems = ({ recommended, verdict, joins }) => [
+    verdict.length ? `<li class="${recommended ? "pick" : ""}"><b>${recommended ? "Which to choose" : "Use them together"}</b>${verdict.map((l) => `<span class="line">${esc(l)}</span>`).join("")}</li>` : "",
+    ...joins.map(joinHint),
+  ].join("");
+
   function fieldMatrix() {
-    const { views, rows, recommended, verdict, joins } = cmp.res.comparison;
+    const { views, rows, recommended } = cmp.res.comparison;
     if (!views.length) return '<div class="empty"><h3>Nothing to compare</h3><p>No view provides any of these fields.</p></div>';
     const total = cmp.res.summary.requested;
     const several = views.length > 1;
@@ -1012,14 +1025,11 @@
       const differs = several && mark && new Set(values).size > 1;
       return `<tr class="${differs ? "differs" : ""}"><th scope="row">${label}${differs ? '<span class="sr"> (differs)</span>' : ""}</th>${values.map((h) => `<td>${h}</td>`).join("")}</tr>`;
     }).join("");
-    const advice = [
-      verdict.length ? `<li class="${recommended ? "pick" : ""}"><b>${recommended ? "Which to choose" : "Use them together"}</b>${verdict.map((l) => `<span class="line">${esc(l)}</span>`).join("")}</li>` : "",
-      ...joins.map(joinHint),
-    ].join("");
+    const advice = adviceItems(cmp.res.comparison);
     return `
       ${advice ? `<ul class="findings advice">${advice}</ul>` : ""}
       <p class="fine">${cmp.chosen ? "The views you chose." : several ? "The views that together cover the most fields." : "The view that covers the most fields."}
-        Choose up to ${MAX_COMPARE} views under All views.${several ? " Shaded rows show where the views differ." : ""}</p>
+        Choose other views under By table or All views.${several ? " Shaded rows show where the views differ." : ""}</p>
       <div class="matrix-wrap" tabindex="0" role="region" aria-label="Fields by view">
         <table class="matrix">${head("Field")}
           <tbody>${rows.map((r) => `<tr><th scope="row" class="code">${esc(r.label)}</th>${r.cells.map((c) => `<td>${cell(c)}</td>`).join("")}</tr>`).join("")}</tbody>
@@ -1029,6 +1039,85 @@
       <div class="table-wrap facts-wrap" tabindex="0" role="region" aria-labelledby="factsTitle">
         <table class="matrix">${head("View")}<tbody>${facts}</tbody></table>
       </div>`;
+  }
+
+  // Per table, the top view of each priority. The switch only changes what is shown here;
+  // Compare side by side then asks for the chosen views.
+  const tablePick = (t, i) => t.picks.find((p) => p.priority === cmp.levels[i]);
+  const tableChoice = () => [...new Set(cmp.res.byTable.map(tablePick).filter(Boolean).map((p) => p.view.name))];
+  const driverView = () => { const t = cmp.res.byTable[cmp.driver]; return (t && tablePick(t, cmp.driver)?.view.name) || ""; };
+  const fewNames = (t) => {
+    const names = t.fields.map((f) => (f.startsWith(`${t.table}-`) ? f.slice(t.table.length + 1) : f));   // VBAP-NETWR -> NETWR
+    return names.length > 3 ? `${names.slice(0, 3).join(", ")} +${fmt(names.length - 3)} more` : names.join(", ");
+  };
+
+  function byTable() {
+    const total = cmp.res.summary.requested;
+    const chosen = tableChoice();
+    const tooMany = chosen.length > MAX_COMPARE;
+    return `
+      <div class="pick-bar"><span class="fine">${tooMany
+        ? `${plural(chosen.length, "different view")} chosen. Side by side shows up to ${MAX_COMPARE}.`
+        : "Best ranked view of each priority per table, with that table's own rank. Other views are joined to the driver first."}</span>
+        <button type="button" class="btn btn-primary" id="compareTables" ${chosen.length && !tooMany ? "" : "disabled"}>Compare side by side</button></div>
+      <div class="table-wrap">
+        <table class="vlist btable">
+          <thead><tr><th scope="col">Driver</th><th scope="col">Table</th><th scope="col">Priority</th><th scope="col">Top view</th><th scope="col">Fields of the table</th></tr></thead>
+          <tbody>${cmp.res.byTable.map((t, i) => {
+            const pick = tablePick(t, i);
+            const levels = [1, 2, 3].map((p) => {
+              const has = t.picks.some((x) => x.priority === p);
+              return `<button type="button" data-table="${i}" data-level="${p}" aria-pressed="${p === cmp.levels[i]}"
+                ${has ? "" : `disabled title="No P${p} view provides these fields"`}>P${p}</button>`;
+            }).join("");
+            return `<tr>
+              <td><input type="radio" name="driverTable" data-driver="${i}" ${i === cmp.driver ? "checked" : ""} ${pick ? "" : "disabled"}
+                aria-label="Use ${esc(t.table)} as the driver table"></td>
+              <td><span class="code">${esc(t.table)}</span><span class="view-sub">${esc(fewNames(t))}</span></td>
+              <td><div class="segmented" role="group" aria-label="Priority for ${esc(t.table)}">${levels}</div></td>
+              ${pick ? `<td>${viewRef(pick.view)}<span class="view-sub">Rank ${fmt(pick.view.rank)} · ${esc(pick.view.priorityLabel)}</span>${pick.view.description ? `<span class="view-sub">${esc(pick.view.description)}</span>` : ""}</td>
+                <td>${cover(pick.tableCovered, t.fields.length)}<span class="view-sub">${fmt(pick.view.covered)} of all ${fmt(total)} fields</span></td>`
+                : '<td colspan="2" class="fine">No view provides these fields.</td>'}</tr>`;
+          }).join("")}</tbody>
+        </table>
+      </div>
+      ${selectionAdvice(chosen)}`;
+  }
+
+  // How to join the views chosen above. It follows the switches; the summary on top keeps the recommendation.
+  function selectionAdvice(chosen) {
+    if (chosen.length < 2 || chosen.length > MAX_COMPARE) return "";
+    const ready = cmp.sel.key === selectionKey() && cmp.sel.comparison;
+    const advice = ready ? adviceItems(cmp.sel.comparison) : "";
+    return `<h3 class="sel-title">How to join your selection</h3>
+      <p class="fine">${[driverView(), ...chosen.filter((n) => n !== driverView())].filter(Boolean).map((n) => `<span class="code">${esc(n)}</span>`).join(" + ")}</p>
+      ${!ready ? '<p class="fine" role="status">Working out the join…</p>'
+        : advice ? `<ul class="findings advice">${advice}</ul>` : '<p class="fine">No join suggestion for these views.</p>'}`;
+  }
+
+  const selectionKey = () => `${tableChoice().join()}|${driverView()}`;
+
+  async function loadSelection() {
+    const names = tableChoice();
+    const key = selectionKey();
+    if (names.length < 2 || names.length > MAX_COMPARE || cmp.sel.key === key) return;
+    cmp.sel = { key, comparison: null };
+    try {
+      const res = await api("/api/coverage", { method: "POST", body: { tables: cmp.tables, fields: cmp.fields, compare: names, driver: driverView() } });
+      if (cmp.sel.key !== key) return;                   // the switches moved on
+      cmp.sel.comparison = res.comparison;
+    } catch (err) {
+      if (cmp.sel.key !== key) return;
+      cmp.sel = { key: "", comparison: null };
+      fieldsError(err.message);
+      return;
+    }
+    const panel = $("#fc-panel-1");
+    if (!panel) return;
+    const focus = document.activeElement?.dataset;
+    panel.innerHTML = byTable();
+    if (focus?.level) $(`#fc-panel-1 [data-table="${focus.table}"][data-level="${focus.level}"]`)?.focus();
+    else if (focus?.driver) $(`#fc-panel-1 [data-driver="${focus.driver}"]`)?.focus();
   }
 
   function fieldViews() {
@@ -1068,9 +1157,9 @@
     if (!nav) return;
     pager(nav, { page: cmp.page, pages: Math.ceil(cmp.res.views.length / FIELD_PAGE) }, (page) => {
       cmp.page = page;
-      $("#fc-panel-1").innerHTML = fieldViews();
+      $("#fc-panel-2").innerHTML = fieldViews();
       fieldPager();
-      $("#fc-panel-1 .vlist").scrollIntoView({ block: "nearest" });
+      $("#fc-panel-2 .vlist").scrollIntoView({ block: "nearest" });
     });
   }
 
@@ -1095,6 +1184,14 @@
 
   const fieldsResult = $("#fieldsResult");
   fieldsResult.addEventListener("change", (e) => {
+    const driver = e.target.closest("[data-driver]");
+    if (driver) {
+      cmp.driver = Number(driver.dataset.driver);
+      $("#fc-panel-1").innerHTML = byTable();
+      $(`#fc-panel-1 [data-driver="${cmp.driver}"]`).focus();
+      loadSelection();
+      return;
+    }
     const box = e.target.closest("[data-pick]");
     if (!box) return;
     if (box.checked && cmp.picked.size >= MAX_COMPARE) {
@@ -1110,6 +1207,22 @@
   fieldsResult.addEventListener("click", (e) => {
     if (e.target.closest("#comparePicked")) {
       compareFields(cmp.res.views.map((v) => v.name).filter((n) => cmp.picked.has(n))).then(() => $("#fc-tab-0")?.click());
+      return;
+    }
+    const level = e.target.closest("[data-level]");
+    if (level) {
+      const { table, level: p } = level.dataset;
+      cmp.levels[table] = Number(p);
+      $("#fc-panel-1").innerHTML = byTable();
+      $(`#fc-panel-1 [data-table="${table}"][data-level="${p}"]`).focus();
+      loadSelection();
+      return;
+    }
+    if (e.target.closest("#fc-tab-1")) loadSelection();
+    if (e.target.closest("#compareTables")) {
+      const names = tableChoice();
+      cmp.picked = new Set(names);                       // All views shows the same choice
+      compareFields(names, driverView()).then(() => $("#fc-tab-0")?.click());
       return;
     }
     const exportButton = e.target.closest("#fieldsExport");
